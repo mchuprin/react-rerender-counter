@@ -1,1 +1,0 @@
-"use strict";const tabId=chrome.devtools.inspectedWindow.tabId;chrome.runtime.sendMessage({type:"GET_REACT_STATE",tabId},e=>{e?.detected&&chrome.devtools.panels.create("React Rerenders",null,"panel.html")});
