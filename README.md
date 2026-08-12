@@ -1,164 +1,153 @@
 # React Rerender Counter
 
-Расширение для браузера (Chrome/Firefox), которое считает и анализирует ре-рендеры React компонентов в реальном времени.
+Chrome DevTools extension for analyzing React component re-renders in real time.
 
-## Стек технологий
+## Stack
 
-| Инструмент | Версия | Назначение |
-|------------|--------|------------|
-| TypeScript | ^7.0.2 | Типобезопасность |
-| esbuild | 0.28.2 | Сборка и бандлинг |
-| Biome | ^2.5.7 | Линтер и форматирование |
-| Chrome Extensions API | Manifest V3 | Платформа расширений |
-| React DevTools Hook | — | Доступ к fiber tree |
+| Tool | Version | Purpose |
+|------|---------|---------|
+| TypeScript | ^7.0.2 | Type safety |
+| React | ^19.2.8 | Panel UI |
+| esbuild | 0.28.2 | Build & bundling |
+| Biome | ^2.5.7 | Linting & formatting |
+| CSS Modules | — | Scoped styling |
+| Manifest V3 | — | Chrome extensions platform |
 
-## Структура проекта
-
-```
-render-counter/
-├── src/
-│   ├── inject.ts           # MAIN world — хук React fiber
-│   ├── content.ts          # ISOLATED world — мост inject ↔ background
-│   ├── background.ts       # Service worker — состояние, badge, сообщения
-│   ├── devtools.ts         # DevTools context — создание панели
-│   ├── devtools.html       # Точка входа DevTools
-│   └── panel.html          # UI панели в DevTools
-├── icons/
-│   ├── icon-48.png
-│   └── icon-128.png
-├── dist/                   # Собранные файлы (грузим в Chrome)
-├── .vscode/
-│   ├── settings.json       # Форматирование при сохранении
-│   └── extensions.json     # Рекомендация Biome
-├── biome.json              # Конфиг линтера и форматтера
-├── tsconfig.json           # Конфиг TypeScript (только проверка типов)
-├── esbuild.config.mjs      # Скрипт сборки
-├── manifest.json           # Манифест расширения
-├── package.json
-└── README.md
-```
-
-## Архитектура
+## Project structure
 
 ```
-┌─────────────┐   CustomEvent    ┌────────────┐  chrome.runtime  ┌──────────────┐
+src/
+├── core/                          # Shared types, constants, utilities
+│   ├── types.ts                   # Single source of truth for all types
+│   └── colors.ts                  # Color mapping functions
+│
+├── entry-points/                  # Chrome execution contexts (thin wrappers)
+│   ├── inject.ts                  # MAIN world — React DevTools hook
+│   ├── content.ts                 # Isolated world — event bridge
+│   ├── background.ts              # Service worker — state, messaging
+│   └── devtools.ts                # DevTools context — panel creation
+│
+├── panel/                         # React application (DevTools panel)
+│   ├── index.tsx                  # createRoot + mount
+│   ├── App.tsx                    # Shell: toolbar, tabs, summary, status bar
+│   ├── App.module.css
+│   ├── hooks/
+│   │   └── useRenderData.ts       # chrome.runtime.connect + state management
+│   ├── views/
+│   │   ├── TableView/             # Table view with sorting & filtering
+│   │   ├── FlamegraphView/        # Flamegraph (cumulative render time)
+│   │   └── TimelineView/          # Canvas timeline + render log
+│   ├── components/
+│   │   ├── Toolbar/               # Logo, tabs, search, recording toggle
+│   │   ├── SummaryBar/            # Top-level statistics
+│   │   ├── ReasonFilter/          # Render reason filter chips
+│   │   ├── StatusBar/             # Bottom status bar
+│   │   ├── DetailPanel/           # Side panel with component info
+│   │   ├── Sparkline/             # SVG sparkline chart
+│   │   ├── ReasonBar/             # Color-coded reason breakdown
+│   │   └── ui/                    # Reusable primitives
+│   │       ├── Badge/
+│   │       ├── StatCell/
+│   │       └── Label/
+│   └── styles/
+│       └── global.css             # CSS variables, normalization, fonts
+│
+├── devtools.html                  # DevTools page shell
+└── panel.html                     # Panel page shell
+```
+
+## Architecture
+
+```
+┌─────────────┐   CustomEvent   ┌────────────┐  chrome.runtime  ┌──────────────┐
 │  inject.ts  │ ──────────────→ │ content.ts │ ←──────────────→ │ background.ts│
 │ (MAIN world)│                 │(ISOLATED)  │                  │(service work)│
 └─────────────┘                 └────────────┘                  └──────┬───────┘
-                                                                     │
-                                                     ┌───────────────┼───────────┐
-                                                     ↓               ↓           ↓
-                                                   badge        devtools.ts   panel.html
+                                                                       │
+                                                       ┌───────────────┼───────────┐
+                                                       ↓               ↓           ↓
+                                                     badge        devtools.ts   panel.html
 ```
 
-### Как работает
+### How it works
 
-1. **inject.ts** запускается на `document_start` в MAIN world (контекст страницы)
-   - Создаёт `window.__REACT_DEVTOOLS_GLOBAL_HOOK__` если его нет
-   - Когда React загружается — вызывает `hook.inject(renderer)` → отправляет событие `REACT_DETECTED`
-   - Подписывается на `onCommitFiberRoot` для получения обновлений fiber tree
+1. **inject.ts** runs at `document_start` in MAIN world (page context)
+   - Creates `window.__REACT_DEVTOOLS_GLOBAL_HOOK__` if missing
+   - When React loads — calls `hook.inject(renderer)` → dispatches `REACT_DETECTED`
+   - Subscribes to `onCommitFiberRoot` for fiber tree updates
 
-2. **content.ts** связывает MAIN ↔ Extension
-   - Слушает `CustomEvent` `REACT_DETECTED` от inject.ts
-   - Пересылает в background.ts через `chrome.runtime.sendMessage`
+2. **content.ts** bridges MAIN ↔ Extension
+   - Listens for `REACT_DETECTED` and `RENDER_DATA` custom events
+   - Forwards to background via `chrome.runtime.sendMessage`
 
-3. **background.ts** управляет состоянием
-   - Хранит статус обнаружения React по каждой вкладке
-   - Обновляет badge (синяя "R" когда React найден)
-   - Отвечает на запросы `GET_REACT_STATE` от devtools.ts
+3. **background.ts** manages state
+   - Stores React detection status per tab
+   - Updates badge (blue "R" when React found)
+   - Handles `GET_REACT_STATE` requests from devtools
 
-4. **devtools.ts** создаёт панель
-   - Спрашивает background: "есть ли React на вкладке?"
-   - Если да → создаёт панель "React Rerenders" в DevTools
+4. **devtools.ts** creates the panel
+   - Asks background: "is React on this tab?"
+   - If yes → creates "React Rerenders" panel in DevTools
 
-## Разработка
+## Development
 
-### Требования
+### Requirements
 
 - Node.js 18+
-- Google Chrome или Firefox 128+
+- Google Chrome 128+
 
-### Установка
+### Setup
 
 ```bash
 npm install
 ```
 
-### Команды
+### Commands
 
-| Команда | Описание |
-|---------|----------|
-| `npm run build` | Собрать в `dist/` |
-| `npm run watch` | Режим отслеживания (пересборка при изменениях) |
-| `npm run typecheck` | Проверка типов через tsc |
-| `npm run lint` | Проверка через Biome |
-| `npm run lint:fix` | Автоисправление ошибок |
-| `npm run format` | Форматирование всех файлов |
+| Command | Description |
+|---------|-------------|
+| `npm run build` | Build to `dist/` |
+| `npm run watch` | Watch mode (rebuild on changes) |
+| `npm run typecheck` | Type checking via tsc |
+| `npm run lint` | Lint via Biome |
+| `npm run lint:fix` | Auto-fix lint errors |
+| `npm run format` | Format all files |
 
-### Загрузка в Chrome
+### Load in Chrome
 
 1. `npm run build`
-2. Открыть `chrome://extensions`
-3. Включить "Режим разработчика"
-4. Нажать "Загрузить распакованное расширение" → выбрать папку `dist/`
-5. Открыть любую React-страницу → F12 → Консоль → видим логи `COMMIT!`
+2. Open `chrome://extensions`
+3. Enable "Developer mode"
+4. Click "Load unpacked" → select `dist/` folder
+5. Open any React page → F12 → Console → see `COMMIT!` logs
 
-### Настройка IDE
+### IDE setup
 
-VS Code с расширением Biome (автоматически через `.vscode/extensions.json`):
-- Форматирование при сохранении
-- Автоисправление при сохранении
-- Сортировка импортов при сохранении
+VS Code with Biome extension (auto-configured via `.vscode/extensions.json`):
+- Format on save
+- Auto-fix on save
+- Import sorting on save
 
-## Задачи
-
-### ✅ Готово
-
-- [x] Настройка проекта (TypeScript, esbuild, Biome)
-- [x] Конфигурация VS Code (форматирование при сохранении, линтер)
-- [x] `inject.ts` — создание хука React DevTools, событие `REACT_DETECTED`
-- [x] `content.ts` — мост между inject и background
-- [x] `background.ts` — управление состоянием вкладок, окраска badge
-- [x] `devtools.ts` + `devtools.html` — условное создание панели
-- [x] `panel.html` — заглушка UI панели
-- [x] `manifest.json` — манифест Chrome MV3
-
-### 🔄 В работе
-
-- [ ] `manifest.json` — добавить background, devtools_page, content.js записи
-- [ ] `inject.ts` — реализовать обход fiber tree и подсчёт ре-рендеров
-- [ ] `content.ts` — пересылка данных о рендерах в background
-
-### 📋 Запланировано
-
-- [ ] **Подсчёт ре-рендеров** — обход fiber tree, классификация триггеров (state/props/context/parent)
-- [ ] **Состояние в background** — хранение статистики по каждому компоненту
-- [ ] **Popup UI** — топ-10 компонентов, счётчик ре-рендеров, кнопка сброса
-- [ ] **DevTools Panel** — полная таблица: имя | ре-рендеры | среднее время | время компонента | триггер
-- [ ] **React Scan overlay** — визуальная подсветка ре-рендерящихся компонентов на странице
-- [ ] **Badge со счётчиком** — показ общего количества ре-рендеров на иконке
-- [ ] **Поддержка Firefox** — отдельный манифест для Firefox
-
-## Ключевые концепции
+## Key concepts
 
 ### React Fiber
 
-Внутренняя структура данных React. Каждый компонент — это `FiberNode` со свойствами:
-- `type` — функция/класс компонента
-- `child`, `sibling`, `return` — структура дерева
-- `alternate` — предыдущий коммит (для diff)
-- `memoizedProps`, `memoizedState` — текущие значения
-- `actualDuration` — время рендера
+Internal data structure of React. Each component is a `FiberNode` with:
+- `type` — function/class component
+- `child`, `sibling`, `return` — tree structure
+- `alternate` — previous commit (for diff)
+- `memoizedProps`, `memoizedState` — current values
+- `actualDuration` — render time
 
 ### `__REACT_DEVTOOLS_GLOBAL_HOOK__`
 
-React проверяет этот хук при старте. Если находит — вызывает `hook.inject(renderer)` для регистрации. Затем при каждом коммите вызывает `hook.onCommitFiberRoot(rendererId, root)`. Наше расширение подписывается на это чтобы получать все обновления fiber tree.
+React checks this hook on startup. If found — calls `hook.inject(renderer)` for registration. Then on each commit calls `hook.onCommitFiberRoot(rendererId, root)`. Our extension subscribes to this to receive all fiber tree updates.
 
 ### MAIN vs ISOLATED World
 
-| Мир | Доступ | Используется |
-|-----|--------|--------------|
-| MAIN | Контекст JS страницы, React internals | `inject.ts` |
-| ISOLATED | Только DOM, API `chrome.runtime` | `content.ts` |
+| World | Access | Used by |
+|-------|--------|---------|
+| MAIN | Page JS context, React internals | `inject.ts` |
+| ISOLATED | DOM only, `chrome.runtime` API | `content.ts` |
 
-Связь между мирами через `CustomEvent` на `window`.
+Communication between worlds via `CustomEvent` on `window`.
